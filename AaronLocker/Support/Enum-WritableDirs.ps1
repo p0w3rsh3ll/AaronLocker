@@ -203,7 +203,8 @@ AccessChk.exe /accepteula -nobanner -w -d -s -f $FilterOut $RootDirectory | ForE
 				{
 					if ($OutputXML)
 					{
-						"<dir name=`"" + $currfile + "`">"
+                        # Path name has to be escaped for XML
+						"<dir name=`"" + [Security.SecurityElement]::Escape($currfile) + "`">"
 					}
 					else
 					{

@@ -130,7 +130,8 @@ function AddNewWorksheet([string]$tabname)
 }
 
 # Add a new named worksheet from lines of text (not CSV)
-#TODO: Support multi-column text; if text has tab characters, split across cells in the row
+# Supports multi-column text; if text has tab characters, splits across cells in the row
+# TODO: Add support for more than 26 columns (e.g., AA1, AB1, AA2, ...)
 function AddWorksheetFromText([string[]]$text, [string]$tabname)
 {
     Write-Host "Populating tab `"$tabname`"..." -ForegroundColor Cyan
@@ -141,10 +142,16 @@ function AddWorksheetFromText([string[]]$text, [string]$tabname)
     $worksheet.UsedRange.VerticalAlignment = -4160 # xlTop
 
     $row = [int]1
-    foreach( $line in $text)
+    foreach($line in $text)
     {
-        $cell = "A" + $row.ToString()
-        $worksheet.Range($cell).FormulaR1C1 = $line
+        $iCol = [int][char]'A'
+        $lineparts = $line.Split("`t")
+        foreach ( $part in $lineparts )
+        {
+            $cell = ([char]$iCol).ToString() + $row.ToString()
+            $worksheet.Range($cell).FormulaR1C1 = $part
+            $iCol++
+        }
         $row++
     }
 

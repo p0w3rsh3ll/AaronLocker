@@ -20,7 +20,7 @@ SUBST drive letters, as the user can change their definitions. If X: is mapped t
 in that share whether it is referenced as \\MYSERVER\Apps\MyProgram.exe or as X:\MyProgram.exe. Similarly,
 AppLocker does the right thing with SUBSTed drive letters.
 
-TODO: At some point, reimplement with hashtable output supporting "label" and "RuleCollection" properties so that path rules have more descriptive names, and can allow only certain file types.
+TODO: At some point, reimplement with hashtable output supporting "label" and "RuleCollection" properties so that path rules have more descriptive names, and can be applied to specific rule collections>
 
 #>
 

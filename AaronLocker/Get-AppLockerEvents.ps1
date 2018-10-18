@@ -31,7 +31,7 @@ Use the -ExeAndDllOnly or -MsiAndScriptOnly switches to retrieve events only fro
 Use the -ForwardedEvents switch to read from the ForwardedEvents log instead of from the EXE/DLL and MSI/Script logs.
 Use the -EvtxLogFilePaths parameter to name one or more saved event log files to read.
 Use the -NoPsFilter switch not to filter out random-named PowerShell policy test script files.
-Use the other -No* switches to omit fields from the output. -NoEventTime and -NoPID are the most important for reducing output size.
+Use the other -No* switches to omit fields from the output. -NoEventTime, -NoEventTimeXL, and -NoPID are the most important for reducing output size.
 
 See the detailed parameter descriptions for more information.
 
@@ -90,6 +90,10 @@ If -NoOriginalPath is specified, OriginalPath data is not included in the output
 FileName is the logged filename (including extension) by itself without path information.
 If -NoFileName is specified, FileName data is not included in the output.
 
+.PARAMETER NoFileExt
+FileExt is the file extension of the logged file. This can be useful to track files with non-standard file extensions.
+If -NoFileExt is specified, FileExt data is not included in the output.
+
 .PARAMETER NoFileType
 FileType is "EXE," "DLL," "MSI," or "SCRIPT."
 If -NoFileType is specified, FileType data is not included in the output.
@@ -133,6 +137,10 @@ EventTime is the date and time that the event occurred, in the computer's local 
 For example, June 13, 2018, 6:49pm plus 17.7210233 seconds is reported as 2018-06-13T18:49:17.7210233.
 If -NoEventTime is specified, EventTime data is not included in the output. This is useful when you want to get at most one event for every file referenced.
 
+.PARAMETER NoEventTimeXL
+EventTimeXL is the date and time that the event occurred, in the computer's local time zone and rendered in a format that Excel recognizes as a date/time, and its filter dropdown renders in a tree view.
+If -NoEventTimeXL is specified, EventTimeXL data is not included in the output. This is useful when you want to get at most one event for every file referenced.
+
 .PARAMETER NoPID
 PID is the process ID. It can be used to correlate EXE files and other file types, including scripts and DLLs.
 If -NoPID is specified, the PID is not included in the output.
@@ -157,13 +165,13 @@ If this optional switch is specified, outputs to a formatted Excel rather than t
 
 .EXAMPLE
 
-.\Get-AppLockerEvents.ps1 -EvtxLogFilePaths .\ForwardedEvents1.evtx, .\ForwardedEvents2.evtx -NoMachineName -NoEventTime
+.\Get-AppLockerEvents.ps1 -EvtxLogFilePaths .\ForwardedEvents1.evtx, .\ForwardedEvents2.evtx -NoMachineName -NoEventTime -NoEventTimeXL
 
 Get warning and error events from events exported into ForwardedEvents1.evtx and ForwardedEvents2.evtx; don't include MachineName or EventTime data in the output.
 
 .EXAMPLE
 
-.\Get-AppLockerEvents.ps1 -NoOriginalPath -NoEventTime -NoUserSID | clip.exe
+.\Get-AppLockerEvents.ps1 -NoOriginalPath -NoEventTime -NoEventTimeXL -NoUserSID | clip.exe
 
 Get warning and error events from the EXE/DLL and MSI/Script logs on the local computer, removing user-specific and time-specific fields, with the goal that each referenced file appears at most once in the output, no matter how many users referenced it or how often. Write the output to the Windows clipboard so that it can be pasted into Microsoft Excel.
 
@@ -187,7 +195,7 @@ Get allowed files from the EXE/DLL and MSI/Script logs on the local computer. Co
 
 .EXAMPLE
 
-.\Get-AppLockerEvents.ps1 -NoOriginalPath -NoEventTime -NoUserSID | ConvertFrom-Csv -Delimiter "`t" | Where-Object { $_.PublisherName.Length -le 1 } | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation
+.\Get-AppLockerEvents.ps1 -NoOriginalPath -NoEventTime -NoEventTimeXL -NoUserSID | ConvertFrom-Csv -Delimiter "`t" | Where-Object { $_.PublisherName.Length -le 1 } | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation
 
 Get warning and error events from the EXE/DLL and MSI/Script logs on the local computer, outputting only unsigned files.
 It converts output into objects, filters on PublisherName length (allowing up to a hyphen in length), then converts back to tab-delimited CSV.
@@ -244,6 +252,8 @@ param(
     [switch]
     $NoFileName = $false,
     [switch]
+    $NoFileExt = $false,
+    [switch]
     $NoFileType = $false,
     [switch]
     $NoPublisherName = $false,
@@ -263,6 +273,8 @@ param(
     $NoMachineName = $false,
     [switch]
     $NoEventTime = $false,
+    [switch]
+    $NoEventTimeXL = $false,
     [switch]
     $NoPID = $false,
     [switch]
@@ -309,9 +321,16 @@ $SubscriptionBkmrk= 'EventID=111'
 #
 $eventLogs = @()
 
+#
+# Specify event log names to query.
+# If looking at ForwardedEvents, also set XPath to filter on provider so we don't inadvertently get events from sources we don't know about.
+#
+$eventProviderFilter = ""
+
 if ($ForwardedEvents)
 {
     $eventLogs += $FwdEventsLogName
+    $eventProviderFilter = "Provider[@Name='Microsoft-Windows-AppLocker' or @Name='Microsoft-Windows-EventForwarder'] and"
 }
 else
 {
@@ -325,7 +344,29 @@ if ($eventLogs.Length -eq 0 -and $EvtxLogFilePaths.Length -eq 0)
 }
 
 #
-# Filter for event log query
+# Eventlog XPath query: optional date/time filtering
+#
+$dateTimeFilter = ""
+if ($FromDateTime -or $ToDateTime)
+{
+    if ($FromDateTime)
+    {
+        $dateTimeFilter = "TimeCreated[@SystemTime>='" + $FromDateTime.ToUniversalTime().ToString("s") + "']"
+        if ($ToDateTime)
+        {
+            $dateTimeFilter += " and "
+        }
+    }
+    if ($ToDateTime)
+    {
+        $dateTimeFilter += "TimeCreated[@SystemTime<='" + $ToDateTime.ToUniversalTime().ToString("s") + "']"
+    }
+
+    $dateTimeFilter = "($dateTimeFilter) and"
+}
+
+#
+# Event log XPath query: event IDs
 #
 $eventIdFilter = "$ExeDllWarning or $MsiScriptWarning or $ExeDllError or $MsiScriptError"
 if ($WarningOnly)
@@ -350,29 +391,10 @@ if ($ForwardedEvents -and !$NoFilteredMachines)
 }
 $eventIdFilter = "($eventIdFilter)"
 
-if ($FromDateTime -or $ToDateTime)
-{
-    $dateTimeFilter = ""
-    if ($FromDateTime)
-    {
-        $dateTimeFilter = "TimeCreated[@SystemTime>='" + $FromDateTime.ToUniversalTime().ToString("s") + "']"
-        if ($ToDateTime)
-        {
-            $dateTimeFilter += " and "
-        }
-    }
-    if ($ToDateTime)
-    {
-        $dateTimeFilter += "TimeCreated[@SystemTime<='" + $ToDateTime.ToUniversalTime().ToString("s") + "']"
-    }
-    # Provider name important when retrieving from ForwardedEvents
-    $filter = "*[System[Provider[@Name='Microsoft-Windows-AppLocker'] and $eventIdFilter" + " and ($dateTimeFilter)]]"
-}
-else
-{
-    # Provider name important when retrieving from ForwardedEvents so always just include it
-    $filter = "*[System[Provider[@Name='Microsoft-Windows-AppLocker'] and $eventIdFilter]]"
-}
+#
+# Set the XPath filter for the event log(s) query
+#
+$filter = "*[System[$eventProviderFilter $dateTimeFilter $eventIdFilter]]"
 ### Use -Verbose to debug the FilterXPath
 Write-Verbose "XPath filter = $filter"
 
@@ -410,6 +432,7 @@ if (!$NoGenericPath)   { $props += "GenericPath" }
 if (!$NoGenericDir)    { $props += "GenericDir" }
 if (!$NoOriginalPath)  { $props += "OriginalPath" }
 if (!$NoFileName)      { $props += "FileName" }
+if (!$NoFileExt)       { $props += "FileExt" }
 if (!$NoFileType)      { $props += "FileType" }
 if (!$NoPublisherName) { $props += "PublisherName" }
 if (!$NoProductName)   { $props += "ProductName" }
@@ -420,6 +443,7 @@ if (!$NoUserSID)       { $props += "UserSID" }
 if (!$NoUserName)      { $props += "UserName" }
 if (!$NoMachineName)   { $props += "MachineName" }
 if (!$NoEventTime)     { $props += "EventTime" }
+if (!$NoEventTimeXL)   { $props += "EventTimeXL" }
 if (!$NoPID)           { $props += "PID" }
 if (!$NoEventType)     { $props += "EventType" }
 $headers = $props -join $t
@@ -458,7 +482,7 @@ else
         }
     }
 }
-Write-Host "Events retrieved." -ForegroundColor Cyan
+Write-Host ($ev.Count.ToString() + " events retrieved.") -ForegroundColor Cyan
 
 #TODO: Figure out whether/when only one works, and why: Xml vs. Get-WinEvent objects
 $UseXml = $true
@@ -494,6 +518,10 @@ function SidToNameLookup([string]$sid)
         {
             $name = $oUser.Value
         }
+        elseif ($sid.EndsWith("-500"))
+        {
+            $name = "[[[built-in local admin]]]";
+        }
         else
         {
             $name = "[[[Not translated]]]"
@@ -507,6 +535,7 @@ function SidToNameLookup([string]$sid)
 # Produce output
 #
 $count = 0
+$filteredOut = 0
 $csv += (
     $ev | foreach {
 
@@ -567,6 +596,8 @@ $csv += (
             }
         }
 
+        if ($filterOut) { $filteredOut++ }
+
         if (!$NoFilteredMachines)
         {
             # Observed machines
@@ -624,6 +655,7 @@ $csv += (
             $binaryName = $pubInfo[2]                     # Original "binary" name (syntax works even if array not this long)
             $filever = $pubInfo[3]                        # File version (syntax works even if array not this long)
             $filename = [System.IO.Path]::GetFileName($origPath)
+            $fileext = [System.IO.Path]::GetExtension($origPath)
             # Generic path replaces user-specific paths with more generic variable syntax.
             # Userprofile has to be performed after more specific appdata replacements.
             $genpath = (($origPath -replace $LocalAppDataPattern, "%LOCALAPPDATA%\") -replace $RoamingAppDataPattern, "%APPDATA%\") -replace $UserProfilePattern, "%USERPROFILE%\"
@@ -635,6 +667,7 @@ $csv += (
             if (!$NoGenericDir)    { $data += $gendir }
             if (!$NoOriginalPath)  { $data += $origPath }
             if (!$NoFileName)      { $data += $filename }
+            if (!$NoFileExt)       { $data += $fileext }
             if (!$NoFileType)      { $data += $filetype }
             if (!$NoPublisherName) { $data += $pubName }
             if (!$NoProductName)   { $data += $prodName }
@@ -645,6 +678,8 @@ $csv += (
             if (!$NoUserName)      { $data += SidToNameLookup $userSid }
             if (!$NoMachineName)   { $data += $machineName }
             if (!$NoEventTime)     { $data += $timeCreated }
+            #TODO: Verify that regional preferences don't interfere with making this useful...
+            if (!$NoEventTimeXL)   { $data += $timeCreated.Replace("T", " ").Substring(0, 19) }
             if (!$NoPID)           { $data += $sPID }
             if (!$NoEventType)     { $data += $eventType }
             # Output the data as CSV
@@ -676,6 +711,7 @@ if (!$NoFilteredMachines)
                 if (!$NoGenericDir)    { $data += "" }
                 if (!$NoOriginalPath)  { $data += "" }
                 if (!$NoFileName)      { $data += "" }
+                if (!$NoFileExt)       { $data += "" }
                 if (!$NoFileType)      { $data += "NONE" }
                 if (!$NoPublisherName) { $data += "" }
                 if (!$NoProductName)   { $data += "" }
@@ -686,6 +722,7 @@ if (!$NoFilteredMachines)
                 if (!$NoUserName)      { $data += "" }
                 if (!$NoMachineName)   { $data += $machineName }
                 if (!$NoEventTime)     { $data += "" }
+                if (!$NoEventTimeXL)   { $data += "" }
                 if (!$NoPID)           { $data += "" }
                 if (!$NoEventType)     { $data += "FILTERED" }
                 # Output the data as CSV
@@ -696,6 +733,7 @@ if (!$NoFilteredMachines)
 }
 
 Write-Host "" # New line after the dots
+Write-Host "$filteredOut events filtered out." -ForegroundColor Cyan
 
 if ($Excel)
 {

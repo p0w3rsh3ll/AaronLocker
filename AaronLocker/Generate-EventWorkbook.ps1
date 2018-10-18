@@ -39,6 +39,13 @@ if (!(Test-Path($AppLockerEventsCsvFile)))
     return
 }
 
+# Get absolute path to input file. (Note that [System.IO.Path]::GetFullName doesn't do this...)
+$AppLockerEventsCsvFileFullPath = $AppLockerEventsCsvFile
+if (!([System.IO.Path]::IsPathRooted($AppLockerEventsCsvFile)))
+{
+    $AppLockerEventsCsvFileFullPath = [System.IO.Path]::Combine((Get-Location).Path, $AppLockerEventsCsvFile)
+}
+
 $rootDir = [System.IO.Path]::GetDirectoryName($MyInvocation.MyCommand.Path)
 # Get configuration settings and global functions from .\Support\Config.ps1)
 # Dot-source the config file. Contains Excel-generation scripts.
@@ -54,67 +61,89 @@ if (CreateExcelApplication)
 {
     Write-Host "Reading data from $AppLockerEventsCsvFile" -ForegroundColor Cyan
     $csvFull = Get-Content $AppLockerEventsCsvFile
+    #Write-Host "Converting to CSV" -ForegroundColor Yellow
     $dataUnfiltered = ($csvFull | ConvertFrom-Csv -Delimiter "`t")
+    #Write-Host "Getting filtered events" -ForegroundColor Yellow
     $dataFiltered = $dataUnfiltered | Where-Object { $_.EventType -ne $sFiltered }
-    #Write-Host ("dataUnfiltered.Count = " + $dataUnfiltered.Count) -ForegroundColor Yellow
-    #Write-Host ("data.Count = " + $dataFiltered.Count) -ForegroundColor Yellow
+    #Write-Host "Getting signed events" -ForegroundColor Yellow
+    $eventsSigned   = ($dataFiltered | Where-Object { $_.PublisherName -ne "-" })
+    #Write-Host "Getting unsigned events" -ForegroundColor Yellow
+    $eventsUnsigned = ($dataFiltered | Where-Object { $_.PublisherName -eq "-" })
 
     # Lines of text for the summary page
+    $tabname = "Summary"
+    Write-Host "Gathering data for `"$tabname`"..." -ForegroundColor Cyan
     $text = @()
     $dtsort = ($dataFiltered.EventTime | Sort-Object); 
     $text += "Summary information"
     $text += ""
-    $text += "Data source: " + [System.IO.Path]::GetFileName($AppLockerEventsCsvFile)
-    $text += "First event: " + ([datetime]($dtsort | Select-Object -First 1)).ToString()
-    $text += "Last event: " + ([datetime]($dtsort | Select-Object -Last 1)).ToString()
-    $text += "Number of events: " + $dataFiltered.Count.ToString()
-    #Write-Host ("data | Select-Object MachineName -Unique: " + ($dataFiltered | Select-Object MachineName -Unique) ) -ForegroundColor Yellow
+    $text += "Data source:`t" + [System.IO.Path]::GetFileName($AppLockerEventsCsvFile)
+    $text += "First event:`t" + ([datetime]($dtsort[0])).ToString()
+    $text += "Last event:`t" + ([datetime]($dtsort[$dtsort.Length - 1])).ToString()
+    $text += "Number of events:`t" + $dataFiltered.Count.ToString()
+    $text += "Number of signed-file events:`t" + $eventsSigned.Count.ToString()
+    $text += "Number of unsigned-file events:`t" + $eventsUnsigned.Count.ToString()
     # Make sure the result of the pipe is an array, even if only one item.
-    $text += "Number of machines reporting events: " + ( @() + ($dataUnfiltered | Select-Object MachineName -Unique)).Count.ToString()
-    AddWorksheetFromText -text $text -tabname "Summary"
+    $text += "Number of machines reporting events:`t" + ( @() + ($dataUnfiltered.MachineName | Group-Object)).Count.ToString()
+    AddWorksheetFromText -text $text -tabname $tabname
 
     # Events per machine:
-    $csv = ($dataFiltered | Select-Object MachineName | Group-Object MachineName | Select-Object Name, Count | Sort-Object Name | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
+    $tabname = "Machines and event counts"
+    Write-Host "Gathering data for `"$tabname`"..." -ForegroundColor Cyan
+    $csv = ($dataFiltered.MachineName | Group-Object | Select-Object Name, Count | Sort-Object Name | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
     $csv += ($dataUnfiltered | Where-Object { $_.EventType -eq $sFiltered } | ForEach-Object { $_.MachineName + "`t0" })
-    AddWorksheetFromCsvData -csv $csv -tabname "Machines and event counts" -CrLfEncoded ""
+    AddWorksheetFromCsvData -csv $csv -tabname $tabname -CrLfEncoded ""
+
+    # Events per user:
+    $tabname = "Users and event counts"
+    Write-Host "Gathering data for `"$tabname`"..." -ForegroundColor Cyan
+    $csv = ($dataFiltered.UserName | Group-Object | Select-Object Name, Count | Sort-Object Name | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
+    AddWorksheetFromCsvData -csv $csv -tabname $tabname -CrLfEncoded ""
 
     # Counts of each publisher:
-    $csv = ($dataFiltered | Select-Object PublisherName | Group-Object PublisherName | Select-Object Name, Count | Sort-Object Name | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
-    AddWorksheetFromCsvData -csv $csv -tabname "Publishers and event counts"
+    $tabname = "Publishers and event counts"
+    Write-Host "Gathering data for `"$tabname`"..." -ForegroundColor Cyan
+    $csv = ($dataFiltered.PublisherName | Group-Object | Select-Object Name, Count | Sort-Object Name | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
+    AddWorksheetFromCsvData -csv $csv -tabname $tabname
 
     # Publisher/product combinations:
-    $csv = ($dataFiltered | Where-Object { $_.PublisherName -ne "-" } | Select-Object PublisherName, ProductName -Unique | Sort-Object PublisherName, ProductName | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
-    AddWorksheetFromCsvData -csv $csv -tabname "Publisher-product combinations"
+    $tabname = "Publisher-product combinations"
+    Write-Host "Gathering data for `"$tabname`"..." -ForegroundColor Cyan
+    $csv = ($eventsSigned | Select-Object PublisherName, ProductName | Sort-Object PublisherName, ProductName -Unique | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
+    AddWorksheetFromCsvData -csv $csv -tabname $tabname
 
     # Publisher/product/file combinations:
-    $csv = ($dataFiltered | Where-Object { $_.PublisherName -ne "-" } | Select-Object PublisherName, ProductName, GenericPath, FileName, FileType -Unique | Sort-Object PublisherName, ProductName, GenericPath | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
-    AddWorksheetFromCsvData -csv $csv -tabname "Signed file info"
+    $tabname = "Signed file info"
+    Write-Host "Gathering data for `"$tabname`"..." -ForegroundColor Cyan
+    $csv = ($eventsSigned | Select-Object PublisherName, ProductName, GenericPath, FileName, FileType | Sort-Object PublisherName, ProductName, GenericPath -Unique | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
+    AddWorksheetFromCsvData -csv $csv -tabname $tabname
 
     # Publisher/product/directory combinations:
-    $csv = ($dataFiltered | Where-Object { $_.PublisherName -ne "-" } | Select-Object PublisherName, ProductName, GenericDir, FileType -Unique | Sort-Object PublisherName, ProductName, GenericDir | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
-    AddWorksheetFromCsvData -csv $csv -tabname "Signed file info (dir only)"
+    $tabname = "Signed file info (dir only)"
+    Write-Host "Gathering data for `"$tabname`"..." -ForegroundColor Cyan
+    $csv = ($eventsSigned | Select-Object PublisherName, ProductName, GenericDir, FileType | Sort-Object PublisherName, ProductName, GenericDir -Unique | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
+    AddWorksheetFromCsvData -csv $csv -tabname $tabname
 
     # Analysis of unsigned files:
-    $csv = ($dataFiltered | Where-Object { $_.PublisherName -eq "-" } | Select-Object GenericPath, FileName, FileType, Hash -Unique | Sort-Object GenericPath | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
-    AddWorksheetFromCsvData -csv $csv -tabname "Unsigned file info"
+    $tabname = "Unsigned file info"
+    Write-Host "Gathering data for `"$tabname`"..." -ForegroundColor Cyan
+    $csv = ($eventsUnsigned | Select-Object GenericPath, FileName, FileType, Hash | Sort-Object GenericPath -Unique | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
+    AddWorksheetFromCsvData -csv $csv -tabname $tabname
 
     # Analysis of unsigned files (dir only):
-    $csv = ($dataFiltered | Where-Object { $_.PublisherName -eq "-" } | Select-Object GenericDir -Unique | Sort-Object GenericDir | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
-    AddWorksheetFromCsvData -csv $csv -tabname "Dirs of unsigned files"
+    $tabname = "Dirs of unsigned files"
+    Write-Host "Gathering data for `"$tabname`"..." -ForegroundColor Cyan
+    $csv = ($eventsUnsigned | Select-Object GenericDir | Sort-Object GenericDir -Unique | ConvertTo-Csv -Delimiter "`t" -NoTypeInformation)
+    AddWorksheetFromCsvData -csv $csv -tabname $tabname
 
     # All event data
-    AddWorksheetFromCsvData -csv $csvFull -tabname "Full details"
+    AddWorksheetFromCsvFile -filename $AppLockerEventsCsvFileFullPath -tabname "Full details"
 
     SelectFirstWorksheet
 
     if ($SaveWorkbook)
     {
-        $xlFname = [System.IO.Path]::ChangeExtension($AppLockerEventsCsvFile, ".xlsx")
-        # Ensure absolute path
-        if (!([System.IO.Path]::IsPathRooted($xlFname)))
-        {
-            $xlFname = [System.IO.Path]::Combine((Get-Location).Path, $xlFname)
-        }
+        $xlFname = [System.IO.Path]::ChangeExtension($AppLockerEventsCsvFileFullPath, ".xlsx")
         SaveWorkbook -filename $xlFname
     }
 

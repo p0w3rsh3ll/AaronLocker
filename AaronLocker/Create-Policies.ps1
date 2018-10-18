@@ -79,12 +79,13 @@ param(
 ####################################################################################################
 
 # --------------------------------------------------------------------------------
-# Make sure minimum PowerShell version present: 5.1
-# Make sure to do version compare correctly (major > 5 OR (major = 5 AND minor >= 1))
+# Only supported PowerShell version at this time: 5.1
+# PS Core v6.x doesn't include AppLocker cmdlets; string .Split() has new overloads that need to be dealt with.
+# (At some point, may also need to check $PSVersionTable.PSEdition)
 $psv = $PSVersionTable.PSVersion
-if ($psv.Major -lt 5 -or ($psv.Major -eq 5 -and $psv.Minor -lt 1))
+if ($psv.Major -ne 5 -or $psv.Minor -ne 1)
 {
-    $errMsg = "This script requires PowerShell v5.1 or newer.`nCurrent version = " + $PSVersionTable.PSVersion.ToString()
+    $errMsg = "This script requires PowerShell v5.1.`nCurrent version = " + $PSVersionTable.PSVersion.ToString()
     Write-Error $errMsg
     return
 }
@@ -181,17 +182,55 @@ if ($Rescan)
         $env:Path = $origPath
     }
 
+    # If a directory grants these permissions, the grantee can write an alternate data stream to the directory
+    # and execute it
+    $ADSWriteAndExecPerms =
+        [System.Security.AccessControl.FileSystemRights]::CreateFiles +
+        [System.Security.AccessControl.FileSystemRights]::CreateDirectories +
+        [System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes +
+        [System.Security.AccessControl.FileSystemRights]::WriteAttributes +
+        [System.Security.AccessControl.FileSystemRights]::ReadData +
+        [System.Security.AccessControl.FileSystemRights]::ExecuteFile
+    $InheritOnly =
+        [System.Security.AccessControl.PropagationFlags]::InheritOnly;
+
+    # Function to determine whether a non-admin can create/modify an alternate data stream (ADS) on the directory
+    function HasWritableADS([System.Xml.XmlElement] $dirItem)
+    {
+        # Write-Verbose ($dirItem.name + ", " + $dirItem.Grantee)
+        $totalRights = [System.Security.AccessControl.FileSystemRights]0;
+        $acl = Get-Acl -LiteralPath $dirItem.Name
+        foreach( $grantee in $dirItem.Grantee ) 
+        {
+            # Write-Verbose $grantee
+            foreach ( $ace in $acl.Access )
+            {
+                # Write-Verbose ($ace.FileSystemRights.ToString() + " | " + $ace.PropagationFlags.ToString())
+                # ACE applies to identified non-admin entity and isn't marked InheritOnly
+                if (($ace.IdentityReference.Value -eq $grantee) -and (($ace.PropagationFlags -band $InheritOnly) -eq 0))
+                {
+                    # Sum them up
+                    $totalRights = $totalRights -bor $ace.FileSystemRights
+                }
+            }
+        }
+        # Write-Verbose "totalRights = $totalRights"
+        return (($totalRights -band $ADSWriteAndExecPerms) -eq $ADSWriteAndExecPerms)
+    }
+
     # Function to remove redundancies from lists of user-writable directories enumerated in the supplied XML.
     # Assumes that input is an XML listing user-writable directories. This script sorts the list of directory names alphabetically, 
     # and then removes any entries for which a parent directory has already been identified.
-    function RemoveRedundantLines([String] $fnameFullXml)
+    # WHILE WE'RE AT IT, when we identify the top-parent writable directories, determine whether the directory allows a non-admin
+    # to add an Alternate Data Stream. If so, output a line to exclude execution from any ADS on the directory.
+    function RemoveRedundantLinesAndIdentifyWritableADS([String] $fnameFullXml)
     {
         $x = [xml](Get-Content $fnameFullXml)
         if ($null -ne $x)
         {
             $lastItem = ""
             # Case-insensitive alphabetic sort of directory names
-            $x.root.dir.name | Sort-Object | foreach {
+            $x.root.dir | Sort-Object name | foreach {
                 # First item in sorted list will be output.
                 # Anything that was output becomes $lastItem, lower-cased and ending with backslash.
                 # Anything that follows that matches $lastItem's full length (with backslash) must be a subdirectory -
@@ -199,10 +238,18 @@ if ($Rescan)
                 # When something doesn't match, it must be something other than a subdirectory of previous $lastItem.
                 # Write it out and make it $lastItem, lower-cased and ending with backslash.
                 $thisItem = $_
-                if ($lastItem.Length -eq 0 -or !$thisItem.ToLower().StartsWith($lastItem))
+                if ($lastItem.Length -eq 0 -or !$thisItem.name.ToLower().StartsWith($lastItem))
                 {
-                    Write-Output $thisItem
-                    $lastItem = $thisItem.ToLower()
+                    # Write output that serves as an exclusion for everything in this directory (including subdirectories)
+                    Write-Output ($thisItem.name + "\*")
+                    if (HasWritableADS($thisItem))
+                    {
+                        # Write output that serves as an exclusion for any potential ADSes of this directory
+                        Write-Output ($thisItem.name + ":*")
+                        #Write-Verbose ("Writable ADS: " + $thisItem.name)
+                        #Write-Verbose ("----------------------------")
+                    }
+                    $lastItem = $thisItem.name.ToLower()
                     if (!$lastItem.EndsWith("\")) { $lastItem += "\" }
                 }
             }
@@ -210,9 +257,9 @@ if ($Rescan)
     }
 
     Write-Host "Removing redundancies in scan results" -ForegroundColor Cyan
-    RemoveRedundantLines $windirFullXml | Out-File -Encoding ASCII $windirTxt
-    RemoveRedundantLines $PfFullXml     | Out-File -Encoding ASCII $PfTxt
-    RemoveRedundantLines $Pf86FullXml   | Out-File -Encoding ASCII $Pf86Txt
+    RemoveRedundantLinesAndIdentifyWritableADS $windirFullXml | Out-File -Encoding ASCII $windirTxt
+    RemoveRedundantLinesAndIdentifyWritableADS $PfFullXml     | Out-File -Encoding ASCII $PfTxt
+    RemoveRedundantLinesAndIdentifyWritableADS $Pf86FullXml   | Out-File -Encoding ASCII $Pf86Txt
 }
 
 ####################################################################################################
@@ -413,7 +460,7 @@ foreach($xPlaceholder in $xPlaceholders)
 	$xExcepts = $xPlaceholder.ParentNode
 	$Wr_windir | foreach {
 		$elem = $xDocument.CreateElement("FilePathCondition")
-		$elem.SetAttribute("Path", $_ + "\*")
+		$elem.SetAttribute("Path", $_)
 		$xExcepts.AppendChild($elem) | Out-Null
 	}
 	$xExcepts.RemoveChild($xPlaceholder) | Out-Null
@@ -429,7 +476,7 @@ foreach($xPlaceholder in $xPlaceholders)
 	$xExcepts = $xPlaceholder.ParentNode
 	$Wr_PF | foreach {
 		$elem = $xDocument.CreateElement("FilePathCondition")
-		$elem.SetAttribute("Path", $_ + "\*")
+		$elem.SetAttribute("Path", $_)
 		$xExcepts.AppendChild($elem) | Out-Null
 	}
 	$xExcepts.RemoveChild($xPlaceholder) | Out-Null
